@@ -1,0 +1,215 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Yoni DAHAN"
+date: "Tuesday, February 17, 2015"
+output: html_document
+---
+#Practical Machine Learning Course Project   
+
+
+##Abstract   
+
+Whereas research on activity recognition has usually focused on determining the nature of a specific activity, this course project is interested in predicting its quality.  
+Given a set of measures provided by an accelerometer, a magnetometer and a gyroscope , the following aims to evaluate how well an user has performed a weight lifting exercise,the Unilateral Dumbbell Biceps Curl.   
+Users were asked to do 10 repetitions of the exercise in different fashions : exactly according to the specification (Class A), throwing the hips to the front (Class E), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C) and lowering the dumbbell only halfway (Class D).   
+The dataset to be used is available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and the details on the experiment are well-described in the original [paper](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf).  
+
+
+##Loading  
+Assuming that the dataset has been properly downloaded and saved in the working directory, the code below allows to load it in R :   
+
+```{r echo=TRUE,cache=TRUE}
+
+##Loads the dataset in R
+train<-read.csv("./CourseProject/train.csv",na.strings=c("NA","#DIV/0!"))
+test<-read.csv("./CourseProject/test.csv",na.strings=c("NA","#DIV/0!"))
+
+```  
+  
+##Basic Summary   
+
+```{r echo=TRUE}
+dim(train)
+```  
+There are 19622 observations of 160 variables. Here are the total amount and percentage of missing values : 
+```{r echo=TRUE}
+sum(is.na(train))##Number of missing values
+sum(is.na(train))/(dim(train)[1]*dim(train)[2])
+```  
+The dataset contains about 61% of missing values. 
+
+The following chunk of code breaks down the proportion of missing values by variable :   
+
+```{r echo=TRUE}
+
+##Ratio of NA's by feature
+ratio_NA<-sapply(1:dim(train)[2],function(x)sum(is.na(train[,x]))/dim(train)[1])
+
+##Gathers in a dataset
+which_NA<-which(ratio_NA>0)
+NA_features<-cbind(names(train)[which_NA],ratio_NA[which_NA])
+NA_features<-t(NA_features)
+NA_features
+```   
+
+There are 100 features which contain more than 97% of missing values. These variables are in fact summary statistics (variance, standard deviation, maximum, minimum, skewness,amplitude and kurtosis).  
+
+This is explained by the way the researchers have conducted the experiment. The measurements of the gyroscope, the accelerometer and the magnetometer and their Euler's angles are provided at a sampling rate of 45Hz. A sliding window (with different lengths from 0.5 and 2.5 seconds and with 0.5 seconds overlap) splits the dataset in continuous time slices. For each time slice, these summary features are calculated on the Euler's angles.
+```{r echo=TRUE}
+length(unique(train$num_window))
+```   
+The dataset is splitted in 858 time series.   
+
+The following chunk of code allows to plot the exercise's by window number.   
+
+```{r echo=TRUE} 
+
+library(ggplot2)
+
+class_by_window<-c()
+
+##Class of exercise for each window :
+for(i in 1:length(unique(train$num_window))){
+        class_window<-mean(as.numeric(train$classe[train$num_window==i]))
+        class_by_window<-rbind(class_by_window,c(i,class_window))
+}
+class_by_window<-data.frame(class_by_window[,1],class_by_window[,2]);names(class_by_window)<-c("window","class");class_by_window<-na.omit(class_by_window);class_by_window$class<-as.factor(class_by_window$class);levels(class_by_window$class)<-c("A","B","C","D","E")
+
+##Plots with ggplot2
+q<-qplot(data=class_by_window,window,class,colour=class);q
+```   
+
+This stepped pattern plot displays the order in which the different exercises were made (repeatedly A,B,C,D,E) and the overlap between consecutive windows.   
+
+Besides, the variables *"raw_timestamp_part_1"* and *"raw_timestamp_part_2"* are respectively the UNIX timestamp and an arbitrary timestamp for the experiment based on the sampling rate of 45Hz.  
+```{r echo=TRUE}
+train$raw_timestamp_part_1<-as.POSIXct(train$raw_timestamp_part_1,
+                                       origin="1970-01-01",tz="GMT")
+range(train$raw_timestamp_part_1)  
+```   
+The experiments were done between November 28, 2011 and December 05, 2011 with usually a break between roughly 12 o'clock and 2pm, lunchtime is lunchtime !  
+
+##Feature Selection    
+The researchers have used the feature selection algorithm of *Hall*. They have been able to select 17 features which best summary the data. This feature selection is out the scope of this course project as we would not be able to operate the same transformations on the test set given by the instructors. 
+   
+   
+Prior to building a classifier, we can remove :  
+
+ - features which summary measurements for each window  (listed above)
+ - features *"X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window","num_window"* that are not useful for our predicting purpose
+
+```{r echo=TRUE}
+
+##Removes the 'summary' features
+train<-train[,-which_NA]
+
+##Removes the 7 first features
+train<-train[,-c(1:7)]
+
+##Verifies if there are remaining NA's
+sum(is.na(train))  
+```   
+
+The *test set* has to be processed in the same way :   
+```{r echo=TRUE}
+test<-test[,-which_NA]
+test<-test[,-c(1:7)]
+```   
+
+##Classification   
+Two algorithms will be compared : a **classification tree** and an ensembling method, the **random forest**.   
+For the purposes of choosing between these two algorithms and appraise their out-of-sample errors, a 3-fold cross validation is carried out :   
+
+
+```{r echo=TRUE,message=FALSE}   
+
+library(caret);library(rpart);library(randomForest)
+set.seed(1306)
+
+##Creates 3 folds
+k<-3
+folds<-createFolds(y=train$classe,k)
+
+valid_cv<-c();cv_tree<-c();cv_rf<-c()
+
+##Performs the 3-fold cross validation
+cv<-for(i in 1:k){
+        test_fold<-train[folds[[i]],]
+        train_fold<-train[-folds[[i]],]
+        
+        ##CART model on train fold
+        tree<-rpart(data=train,classe~.)
+        
+        ##Random forest model on train fold
+        rf<-randomForest(x=train_fold[,-53],y=train_fold$classe)
+        
+        ##Predicts on test fold
+        predict_tree<-predict(tree,test_fold[,-53],type="class")
+        predict_rf<-predict(rf,test_fold[,-53])
+        
+        ##Obtains the accuracies
+        cv_tree<-rbind(cv_tree,confusionMatrix(test_fold$classe,predict_tree)$overall[1])
+        cv_rf<-rbind(cv_rf,confusionMatrix(test_fold$classe,predict_rf)$overall[1])
+        }
+
+##Gathers the results
+cv_both<-data.frame(cv_tree,cv_rf);names(cv_both)<-c("tree","random forest")
+
+cv_both
+```   
+The random forest classifier is far more precise than the tree-based model (roughly 99% Vs 75%). The estimated **out-of-sample error with the random forest model can be estimated at about less than 1%**.   
+Here's a plot of the errors of the random forest classifier :  
+   
+   
+```{r echo=TRUE}
+
+##Builds a random forest model on train set
+model_rf<-randomForest(x=train[,-53],y=train$classe)
+
+##Sets graphic parameters and plots
+par(mar=c(4,4,4,3))
+plot(model_rf,log="y")
+legend("top", colnames(model_rf$err.rate),col=1:6,cex=0.6,fill=1:6)
+```   
+
+The errors decrease fastly from the 1st to the 50th tree and then reach a plateau.  
+   
+   
+Also, the model seems more accurate for the extreme classes. That is, when the exercise is made totally according to the specification (Class A) or totally differently (throwing the hips to the front, Class E).   
+It has more difficulty to predict the 'intermediary exercises', in other words when the exercise is performed 'half-well' (throwing the elbows to the front, Class B, lifting the dumbbell only halfway, Class C and lowering the dumbbell only halfway, Class D).   
+
+##Submission results   
+Finally, we can apply the model to the test data from course project :   
+
+```{r echo=TRUE}
+
+##Predicts with test data
+answers<-predict(model_rf,test)
+
+##Creates a text file for each test
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+answers
+```   
+The predicted classes for the 20 tests are : B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B. 
+
+##References   
+* Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. **Qualitative Activity Recognition of Weight Lifting Exercises**. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.   
+
+
+
+
+
+
+
+
+
+
+
+
+
